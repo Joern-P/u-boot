@@ -131,7 +131,7 @@
 
 #define RKIMG_BOOTCOMMAND \
 	"run distro_bootcmd;"
-
+#endif
 
 #define CONFIG_DISPLAY_BOARDINFO_LATE
 
