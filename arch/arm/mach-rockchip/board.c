@@ -218,7 +218,6 @@ static int boot_from_udisk(void)
 			rockchip_set_bootdev(desc);
 			env_set("devtype", "usb");
 			env_set("devnum", "0");
-			env_set("reboot_mode", "recovery-usb");
 			printf("Boot from usb 0\n");
 		} else {
 			printf("No usb dev 0 found\n");
@@ -230,11 +229,28 @@ static int boot_from_udisk(void)
 }
 #endif
 
+static void cmdline_handle(void)
+{
+#ifdef CONFIG_ROCKCHIP_PRELOADER_ATAGS
+	struct tag *t;
+
+	t = atags_get_tag(ATAG_PUB_KEY);
+	if (t) {
+		/* Pass if efuse/otp programmed */
+		if (t->u.pub_key.flag == PUBKEY_FUSE_PROGRAMMED)
+			env_update("bootargs", "fuse.programmed=1");
+		else
+			env_update("bootargs", "fuse.programmed=0");
+	}
+#endif
+}
+
 int board_late_init(void)
 {
 	rockchip_set_serialno();
 	rockchip_set_ethaddr();
-	
+	setup_download_mode();
+
 #if (CONFIG_ROCKCHIP_BOOT_MODE_REG > 0)
 	setup_boot_mode();
 #endif
@@ -248,13 +264,14 @@ int board_late_init(void)
 	rockchip_show_logo();
 #endif
 	soc_clk_dump();
+	cmdline_handle();
 
 	return rk_board_late_init();
 }
 
 #ifdef CONFIG_USING_KERNEL_DTB
 /* Here, only fixup cru phandle, pmucru is not included */
-static int phandles_fixup(void *fdt)
+static int phandles_fixup_cru(void *fdt)
 {
 	const char *props[] = { "clocks", "assigned-clocks" };
 	struct udevice *dev;
@@ -306,7 +323,7 @@ static int phandles_fixup(void *fdt)
 
 		list_for_each_entry(dev, &uc->dev_head, uclass_node) {
 			/* Only U-Boot node go further */
-			if (!dev_read_bool(dev, "u-boot,dm-pre-reloc") ||
+			if (!dev_read_bool(dev, "u-boot,dm-pre-reloc") &&
 			    !dev_read_bool(dev, "u-boot,dm-spl"))
 				continue;
 
@@ -360,9 +377,84 @@ static int phandles_fixup(void *fdt)
 	return 0;
 }
 
+static int phandles_fixup_gpio(void *fdt, void *ufdt)
+{
+	struct udevice *dev;
+	struct uclass *uc;
+	const char *prop = "gpios";
+	const char *comp;
+	char *gpio_name[10];
+	int gpio_off[10];
+	int pinctrl;
+	int offset;
+	int i = 0;
+	int n = 0;
+
+	pinctrl = fdt_path_offset(fdt, "/pinctrl");
+	if (pinctrl < 0)
+		return 0;
+
+	memset(gpio_name, 0, sizeof(gpio_name));
+	for (offset = fdt_first_subnode(fdt, pinctrl);
+	     offset >= 0;
+	     offset = fdt_next_subnode(fdt, offset)) {
+		/* assume the font nodes are gpio node */
+		if (++i >= ARRAY_SIZE(gpio_name))
+			break;
+
+		comp = fdt_getprop(fdt, offset, "compatible", NULL);
+		if (!comp)
+			continue;
+
+		if (!strcmp(comp, "rockchip,gpio-bank")) {
+			gpio_name[n] = (char *)fdt_get_name(fdt, offset, NULL);
+			gpio_off[n]  = offset;
+			n++;
+		}
+	}
+
+	if (!gpio_name[0])
+		return 0;
+
+	if (uclass_get(UCLASS_KEY, &uc) || list_empty(&uc->dev_head))
+		return 0;
+
+	list_for_each_entry(dev, &uc->dev_head, uclass_node) {
+		u32 new_phd, phd_old;
+		char *name;
+		ofnode ofn;
+
+		if (!dev_read_bool(dev, "u-boot,dm-pre-reloc") &&
+		    !dev_read_bool(dev, "u-boot,dm-spl"))
+			continue;
+
+		if (dev_read_u32_array(dev, prop, &phd_old, 1))
+			continue;
+
+		ofn = ofnode_get_by_phandle(phd_old);
+		if (!ofnode_valid(ofn))
+			continue;
+
+		name = (char *)ofnode_get_name(ofn);
+		if (!name)
+			continue;
+
+		for (i = 0; i < ARRAY_SIZE(gpio_name[i]); i++) {
+			if (gpio_name[i] && !strcmp(name, gpio_name[i])) {
+				new_phd = fdt_get_phandle(fdt, gpio_off[i]);
+				dev_write_u32_array(dev, prop, &new_phd, 1);
+				break;
+			}
+		}
+	}
+
+	return 0;
+}
+
 int init_kernel_dtb(void)
 {
 	ulong fdt_addr;
+	void *ufdt_blob;
 	int ret;
 
 	fdt_addr = env_get_ulong("fdt_addr_r", 16, 0);
@@ -388,13 +480,20 @@ int init_kernel_dtb(void)
 		}
 	}
 
+	ufdt_blob = (void *)gd->fdt_blob;
 	gd->fdt_blob = (void *)fdt_addr;
+
+	hotkey_run(HK_FDT);
 
 	/*
 	 * There is a phandle miss match between U-Boot and kernel dtb node,
-	 * the typical is cru phandle, we fixup it in U-Boot live dt nodes.
+	 * we fixup it in U-Boot live dt nodes.
+	 *
+	 * CRU:	 all nodes.
+	 * GPIO: key nodes.
 	 */
-	phandles_fixup((void *)gd->fdt_blob);
+	phandles_fixup_cru((void *)gd->fdt_blob);
+	phandles_fixup_gpio((void *)gd->fdt_blob, (void *)ufdt_blob);
 
 	of_live_build((void *)gd->fdt_blob, (struct device_node **)&gd->of_root);
 	dm_scan_fdt((void *)gd->fdt_blob, false);
@@ -451,20 +550,13 @@ void board_env_fixup(void)
 	}
 }
 
-static void early_download_init(void)
+static void early_download(void)
 {
 #if defined(CONFIG_PWRKEY_DNL_TRIGGER_NUM) && \
 		(CONFIG_PWRKEY_DNL_TRIGGER_NUM > 0)
 	if (pwrkey_download_init())
 		printf("Pwrkey download init failed\n");
 #endif
-
-	if (!tstc())
-		return;
-
-	gd->console_evt = getc();
-	if (gd->console_evt <= 0x1a) /* 'z' */
-		printf("Hotkey: ctrl+%c\n", (gd->console_evt + 'a' - 1));
 
 #if (CONFIG_ROCKCHIP_BOOT_MODE_REG > 0)
 	if (is_hotkey(HK_BROM_DNL)) {
@@ -477,14 +569,30 @@ static void early_download_init(void)
 #endif
 }
 
+static void board_debug_init(void)
+{
+	if (!gd->serial.using_pre_serial)
+		board_debug_uart_init();
+
+	if (tstc()) {
+		gd->console_evt = getc();
+		if (gd->console_evt <= 0x1a) /* 'z' */
+			printf("Hotkey: ctrl+%c\n", gd->console_evt + 'a' - 1);
+	}
+}
+
 int board_init(void)
 {
-	board_debug_uart_init();
+	board_debug_init();
+
+#ifdef DEBUG
+	soc_clk_dump();
+#endif
 
 #ifdef CONFIG_USING_KERNEL_DTB
 	init_kernel_dtb();
 #endif
-	early_download_init();
+	early_download();
 
 	/*
 	 * pmucru isn't referenced on some platforms, so pmucru driver can't
