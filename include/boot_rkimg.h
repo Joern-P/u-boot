@@ -48,6 +48,8 @@ struct rockchip_image {
 #define TAG_KERNEL			0x4C4E524B
 #define BCB_MESSAGE_BLK_OFFSET		(16 * 1024 >> 9)
 
+#define PART_UBOOT			"uboot"
+#define PART_TRUST			"trust"
 #define PART_MISC			"misc"
 #define PART_RESOURCE			"resource"
 #define PART_KERNEL			"kernel"
@@ -55,11 +57,14 @@ struct rockchip_image {
 #define PART_RECOVERY			"recovery"
 #define PART_DTBO			"dtbo"
 #define PART_LOGO			"logo"
+#define PART_SYSTEM			"system"
 
 struct blk_desc *rockchip_get_bootdev(void);
 void rockchip_set_bootdev(struct blk_desc *desc);
 void board_run_recovery_wipe_data(void);
 void setup_download_mode(void);
 int rockchip_get_boot_mode(void);
+int rockchip_read_dtb_file(void *fdt_addr);
+int init_kernel_dtb(void);
 
 #endif

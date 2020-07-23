@@ -20,7 +20,11 @@
 
 #define CONFIG_SYS_NS16550_MEM32
 
+#ifdef CONFIG_SPL_BUILD
+#define CONFIG_NR_DRAM_BANKS		2
+#else
 #define CONFIG_NR_DRAM_BANKS		12
+#endif
 
 #ifndef CONFIG_SPL_BUILD
 #include <config_distro_defaults.h>
@@ -109,6 +113,11 @@
 	"name=security,size=2M,uuid=${uuid_gpt_security};" \
 	"name=userdata,size=-,uuid=${uuid_gpt_userdata};\0"
 
+#ifdef CONFIG_DM_RAMDISK
+#define RKIMG_DET_BOOTDEV \
+	"rkimg_bootdev=" \
+	"setenv devtype ramdisk; setenv devnum 0; \0"
+#else
 #define RKIMG_DET_BOOTDEV \
 	"rkimg_bootdev=" \
 	"if mmc dev 1 && rkimgtest mmc 1; then " \
@@ -128,6 +137,8 @@
 	"elif rksfc dev 1; then " \
 		"setenv devtype spinor; setenv devnum 1;" \
 	"fi; \0"
+#endif
+
 
 #define RKIMG_BOOTCOMMAND \
 	"run distro_bootcmd;"
